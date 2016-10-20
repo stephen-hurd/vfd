@@ -7,13 +7,14 @@
 	Mods:		06 May 2016 - Added some doc and changed port_init() to return rather
 					than to exit.
 				18 May 2016 - Verify vlan is configured for the port/vf before acking it; nak
-					if it is not. 
+					if it is not.
 				19 May 2016 - Added check for VF range in print function.
 				05 Aug 2016 - Changes to work with dpdk16.04.
 				15 Aug 2016 - Changes to work with dpdk16.07.
 				16 Aug 2016 - removed unused routines.
 				07 Sep 2016 - Remvoed TAILQ macros as these seemed to be freeing a block of memory
 					without discarding the pointer.
+				20 Oct 2016 - Changes to support the dpdk 16.11 rc1 code.
 
 	useful doc:
 				 http://www.intel.com/content/dam/doc/design-guide/82599-sr-iov-driver-companion-guide.pdf
@@ -105,13 +106,11 @@ set_vf_rate_limit(portid_t port_id, uint16_t vf, uint16_t rate, uint64_t q_msk)
 	rte_eth_link_get_nowait(port_id, &link);
 	if (rate > link.link_speed) {
 		bleat_printf( 0, "set_vf_rate: invalid rate value: %u bigger than link speed: %u", rate, link.link_speed);
-		//return 1;
+		return 1;
 	}
 	diag = rte_eth_set_vf_rate_limit(port_id, vf, rate, q_msk);
 	if (diag != 0) {
 		bleat_printf( 0, "set_vf_rate: unable to set value %u: (%d) %s", rate, diag, strerror( -diag ) );
-	
-		//bleat_printf( 0, "rte_eth_set_vf_rate_limit for port_id=%d failed diag=%d", port_id, diag);
 	}
 
 	return diag;
@@ -128,7 +127,6 @@ tx_vlan_insert_set_on_vf(portid_t port_id, uint16_t vf_id, int vlan_id)
 {
 	int diag;
 
-	//diag = rte_pmd_ixgbe_set_vf_vlan_insert(port_id, vf_id, !!vlan_id);	// new code was accepting only 1|0 (seems wrong)
 	diag = rte_pmd_ixgbe_set_vf_vlan_insert( port_id, vf_id, vlan_id );
 
 	if (diag < 0) {
@@ -151,8 +149,6 @@ rx_vlan_strip_set_on_vf(portid_t port_id, uint16_t vf_id, int on)
 		bleat_printf( 3, "set vlan strip on vf successful: port=%d, vf_id=%d on/off=%d", port_id, vf_id, on );
 	}
 }
-
-
 
 
 void
@@ -334,23 +330,20 @@ void set_split_erop( portid_t port_id, uint16_t vf_id, int state ) {
 */
 void set_queue_drop( portid_t port_id, int state ) {
 	int 		i;
-	uint32_t reg_off;
-	uint32_t reg_value;							// value to write into the register
+	int		result;
 
-
-	reg_off = 0x02f04; 							// PF queue drop enable register (pg728)
-	
-	bleat_printf( 2, "setting queue drop for port %d on all queues to: %d", port_id, (state & 0x01) );
+	bleat_printf( 2, "setting queue drop for port %d on all queues to: on/off=%d", port_id, !!state );
 	for( i = 0; i < 128; i++ ) {
-		reg_value = IXGBE_QDE_WRITE | (i << IXGBE_QDE_IDX_SHIFT) | (state & 0x01);
-
-		port_pci_reg_write( port_id, reg_off, reg_value );
+		result = rte_pmd_ixgbe_set_vf_split_drop_en( port_id, i, !!state );
+		if( result != 0 ) {
+			bleat_printf( 0, "fail: unable to set drop enable for port %d vf %d on/off=%d: errno=%d", port_id, i, !!state, -result );
+		}
 	}
 	
 	/*
 	 disable default pool to avoid DMAR errors when we get packets not destined to any VF
 	*/
-	 
+
 	disable_default_pool(port_id);
 }
 
@@ -400,7 +393,7 @@ is_rx_queue_on(portid_t port_id, uint16_t vf_id, int* mcounter )
 	}
 }
 
-/* 
+/*
 	Drop packets which are not directed to any of VF's
 	instead of sending them to default pool
 */
@@ -522,7 +515,7 @@ process_refresh_queue(void)
 				}
 				memset( refresh_item, 0, sizeof( *refresh_item ) );
 				free(refresh_item);
-			} 
+			}
 			else
 			{
 				refresh_item->enabled = is_rx_queue_on(refresh_item->port_id, refresh_item->vf_id, &refresh_item->mcounter );
@@ -583,10 +576,9 @@ nic_stats_display(uint8_t port_id, char * buff, int bsize)
 	Returns number of characters placd into buff, or -1 if error (vf not in use
 	or out of range).  The parm ivf is the virtual function number which is maintained
 	as integer in our datstructs allowing -1 to indicate an uninstalled/delted VF.
-	It is converted to uint32 for calculations here. 
-* 
+	It is converted to uint32 for calculations here.
 */
-int 
+int
 vf_stats_display(uint8_t port_id, uint32_t pf_ari, int ivf, char * buff, int bsize)
 {
 	uint32_t vf;
@@ -630,24 +622,24 @@ vf_stats_display(uint8_t port_id, uint32_t pf_ari, int ivf, char * buff, int bsi
 	return 	snprintf(buff, bsize, "%s   %4d    %04X:%02X:%02X.%01X    %s %32"PRIu32" %10"PRIu64" %32"PRIu32" %10"PRIu64"\n",
 				"vf",
 				vf,
-				vf_pci_addr.domain, 
-				vf_pci_addr.bus, 
-				vf_pci_addr.devid, 
+				vf_pci_addr.domain,
+				vf_pci_addr.bus,
+				vf_pci_addr.devid,
 				vf_pci_addr.function,
 				status,
-				rx_pkts, 
-				rx_octets, 
-				tx_pkts, 
+				rx_pkts,
+				rx_octets,
+				tx_pkts,
 				tx_octets);
 }
 
 
 /*
-  dumps all LAN ID's configured 
-  to be used for debugging  
+  dumps all LAN ID's configured
+  to be used for debugging
   or to check if number of vlans doesn't exceed MAX (64)
 */
-int 
+int
 dump_vlvf_entry(portid_t port_id)
 {
 	uint32_t res;
@@ -841,7 +833,7 @@ vf_msb_event_callback(uint8_t port_id, enum rte_eth_event_type type, void *param
 			if( valid_vlan( port_id, vf, (int) msgbuf[1] )) {
 				bleat_printf( 1, "vlan set event approved: port=%d vf=%d vlan=%d (responding noop-ack)", port_id, vf, (int) msgbuf[1] );
 				//*((int*) param) = RTE_ETH_MB_EVENT_PROCEED;
-				p.retval = RTE_PMD_IXGBE_MB_EVENT_NOOP_ACK;     // good rc to VM while not changing anything 
+				p.retval = RTE_PMD_IXGBE_MB_EVENT_NOOP_ACK;     // good rc to VM while not changing anything
 			} else {
 				bleat_printf( 1, "vlan set event rejected; vlan not not configured: port=%d vf=%d vlan=%d (responding noop-ack)", port_id, vf, (int) msgbuf[1] );
 				p.retval = RTE_PMD_IXGBE_MB_EVENT_NOOP_NACK;     // VM should see failure
@@ -1007,6 +999,3 @@ void dump_dev_info( int num_ports  ) {
 		bleat_printf( 0, "port=%d vmdq_pool_base = %d", i, dev_info.vmdq_pool_base);
 	}
 }
-
-
-
