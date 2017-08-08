@@ -792,6 +792,8 @@ extern int vfd_update_nic( parms_t* parms, sriov_conf_t* conf ) {
 						if( parms->forreal )
 							set_vf_rx_vlan(port->rte_port_number, vlan, vf_mask, 0);		// remove the vlan id from the list
 					}
+					set_vf_vlan_anti_spoofing(port->rte_port_number, vf->num, 0)
+					set_vf_mac_anti_spoofing(port->rte_port_number, vf->num, 0)
 				} else {
 					int v;
 					for(v = 0; v < vf->num_vlans; ++v) {
